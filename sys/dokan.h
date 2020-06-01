@@ -34,12 +34,12 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <ntstrsafe.h>
 
 #include "public.h"
+#include "util/log.h"
 
 //
 // DEFINES
 //
 
-extern ULONG g_Debug;
 extern LOOKASIDE_LIST_EX g_DokanCCBLookasideList;
 extern LOOKASIDE_LIST_EX g_DokanFCBLookasideList;
 extern LOOKASIDE_LIST_EX g_DokanEResourceLookasideList;
@@ -95,12 +95,14 @@ extern DokanPtr_FsRtlAreThereWaitingFileLocks
 #endif
 
 // {D6CC17C5-1734-4085-BCE7-964F1E9F5DE9}
+#ifndef DOKAN_BASE_GUID
 #define DOKAN_BASE_GUID                                                        \
   {                                                                            \
     0xd6cc17c5, 0x1734, 0x4085, {                                              \
       0xbc, 0xe7, 0x96, 0x4f, 0x1e, 0x9f, 0x5d, 0xe9                           \
     }                                                                          \
   }
+#endif
 
 #define TAG (ULONG)'AKOD'
 
@@ -126,21 +128,6 @@ extern ULONG DokanMdlSafePriority;
 #define DOKAN_CHECK_INTERVAL (1000 * 5)                     // in millisecond
 
 #define DOKAN_KEEPALIVE_TIMEOUT_DEFAULT (1000 * 15) // in millisecond
-
-#define DDbgPrint(...)                                                         \
-  if (g_Debug & DOKAN_DEBUG_DEFAULT) {                                         \
-    KdPrintEx(                                                                 \
-        (DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "[DokanFS] " __VA_ARGS__));  \
-  }
-
-extern UNICODE_STRING FcbFileNameNull;
-#define DokanPrintFileName(FileObject)                                         \
-  DDbgPrint("  FileName: %wZ FCB.FileName: %wZ\n", &FileObject->FileName,      \
-            FileObject->FsContext2                                             \
-                ? (((PDokanCCB)FileObject->FsContext2)->Fcb                    \
-                       ? &((PDokanCCB)FileObject->FsContext2)->Fcb->FileName   \
-                       : &FcbFileNameNull)                                     \
-                : &FcbFileNameNull)
 
 extern NPAGED_LOOKASIDE_LIST DokanIrpEntryLookasideList;
 #define DokanAllocateIrpEntry()                                                \
@@ -217,49 +204,13 @@ typedef struct _DOKAN_GLOBAL {
   LIST_ENTRY MountPointList;
   LIST_ENTRY DeviceDeleteList;
   KEVENT KillDeleteDeviceEvent;
+
+  // We try to avoid having race condition when switching the AutoMount flag of
+  // the MountManager. Yes, this only guarantee for dokan mount and it is still
+  // possible another process conflict with it but that the best we can do.
+  ERESOURCE MountManagerLock;
+
 } DOKAN_GLOBAL, *PDOKAN_GLOBAL;
-
-typedef struct _DOKAN_LOGGER {
-
-  PDRIVER_OBJECT DriverObject;
-  UCHAR MajorFunctionCode;
-
-} DOKAN_LOGGER, *PDOKAN_LOGGER;
-
-#define DOKAN_INIT_LOGGER(logger, driverObject, majorFunctionCode)             \
-  DOKAN_LOGGER logger;                                                         \
-  logger.DriverObject = driverObject;                                          \
-  logger.MajorFunctionCode = majorFunctionCode;
-
-// Logs an error to the Windows event log, even in production, with the given
-// status, and returns the status passed in.
-NTSTATUS DokanLogError(__in PDOKAN_LOGGER Logger,
-                       __in NTSTATUS Status,
-                       __in LPCTSTR Format,
-                       ...);
-
-// Logs an informational message to the Windows event log, even in production.
-VOID DokanLogInfo(__in PDOKAN_LOGGER Logger, __in LPCTSTR Format, ...);
-
-// A compact stack trace that can be easily logged.
-typedef struct _DokanBackTrace {
-  // The full address of a point-of-reference instruction near where the logging
-  // occurs. One should be able to find this instruction in the disassembly of
-  // the driver by seeing the log message content aside from this value. This
-  // value then tells you the absolute address of that instruction at runtime.
-  ULONG64 Address;
-
-  // Three return addresses truncated to their lowest 20 bits. The lowest 20
-  // bits of this value is the most distant return address, the next 20 bits are
-  // the next frame up, etc. To find each of the 3 instructions referenced here,
-  // one replaces the lowest 20 bits of Ip.
-  ULONG64 ReturnAddresses;
-} DokanBackTrace, *PDokanBackTrace;
-
-// Captures a trace where Address is the full address of the call site
-// instruction after the DokanCaptureBackTrace call, and ReturnAddresses
-// indicates the 3 return addresses below that.
-VOID DokanCaptureBackTrace(__out PDokanBackTrace Trace);
 
 // make sure Identifier is the top of struct
 typedef struct _DokanDiskControlBlock {
@@ -286,6 +237,9 @@ typedef struct _DokanDiskControlBlock {
 
   PUNICODE_STRING DiskDeviceName;
   PUNICODE_STRING SymbolicLinkName;
+  // MountManager assigned a persistent symbolic link name
+  // during IOCTL_MOUNTDEV_LINK_CREATED
+  PUNICODE_STRING PersistentSymbolicLinkName;
   PUNICODE_STRING MountPoint;
   PUNICODE_STRING UNCName;
   LPWSTR VolumeLabel;
@@ -390,6 +344,11 @@ typedef struct _DokanVolumeControlBlock {
   BOOLEAN HasEventWait;
   DokanResourceDebugInfo ResourceDebugInfo;
   DOKAN_LOGGER ResourceLogger;
+
+  // A mask that all Fcbs created for this volume match. We update this when we
+  // deal each one out. In practice, they all tend to have the same first 40
+  // bits on x64.
+  LONG64 ValidFcbMask;
 
   // Whether keep-alive has been activated on this volume.
   BOOLEAN IsKeepaliveActive;
@@ -904,12 +863,6 @@ DRIVER_DISPATCH DokanResetPendingIrpTimeout;
 
 DRIVER_DISPATCH DokanGetAccessToken;
 
-LONG
-DokanUnicodeStringChar(__in PUNICODE_STRING UnicodeString,
-                            __in WCHAR Char);
-
-LONG DokanStringChar(__in PWCHAR String, __in ULONG Length, __in WCHAR Char);
-
 NTSTATUS
 DokanCheckShareAccess(_In_ PFILE_OBJECT FileObject, _In_ PDokanFCB FcbOrDcb,
                       _In_ ACCESS_MASK DesiredAccess, _In_ ULONG ShareAccess);
@@ -1028,12 +981,29 @@ DokanCreateDiskDevice(__in PDRIVER_OBJECT DriverObject, __in ULONG MountId,
 VOID DokanInitVpb(__in PVPB Vpb, __in PDEVICE_OBJECT VolumeDevice);
 VOID DokanDeleteDeviceObject(__in PDokanDCB Dcb);
 VOID DokanDeleteMountPoint(__in PDokanDCB Dcb);
-VOID DokanPrintNTStatus(NTSTATUS Status);
+
+// Create FSCTL_SET_REPARSE_POINT payload request aim to be sent with
+// SendDirectoryFsctl.
+PCHAR CreateSetReparsePointRequest(__in PUNICODE_STRING SymbolicLinkName,
+                                   __out PULONG Length);
+
+// Create FSCTL_DELETE_REPARSE_POINT payload request aim to be sent with
+// SendDirectoryFsctl.
+PCHAR CreateRemoveReparsePointRequest(__out PULONG Length);
+
+// Open a Directory path and send a FsControl with the input buffer.
+NTSTATUS SendDirectoryFsctl(__in PDEVICE_OBJECT DeviceObject,
+                            __in PUNICODE_STRING Path, __in ULONG Code,
+                            __in PCHAR Input, __in ULONG Length);
+
+// Run function as System user and wait that it returns.
+VOID RunAsSystem(_In_ PKSTART_ROUTINE StartRoutine, PVOID StartContext);
 
 NTSTATUS DokanOplockRequest(__in PIRP *pIrp);
 NTSTATUS DokanCommonLockControl(__in PIRP Irp);
 
-NTSTATUS DokanRegisterUncProviderSystem(PDokanDCB dcb);
+// Register the UNCName to system multiple UNC provider.
+VOID DokanRegisterUncProvider(__in PVOID pDcb);
 
 // Use this instead of DokanCompleteIrpRequest, if the dispatch routine sets
 // Information as it goes (via PREPARE_OUTPUT etc.).
@@ -1062,41 +1032,9 @@ NTSTATUS DokanNotifyReportChange(__in PDokanFCB Fcb, __in ULONG FilterMatch,
 // Ends all pending waits for directory change notifications.
 VOID DokanCleanupAllChangeNotificationWaiters(__in PDokanVCB Vcb);
 
-PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
-                           __in ULONG FileNameLength);
-
 // Backs out an atomic oplock request that was made in DokanDispatchCreate. This
 // should be called if the IRP for which the request was made is about to fail.
 VOID DokanMaybeBackOutAtomicOplockRequest(__in PDokanCCB Ccb, __in PIRP Irp);
-
-// Decrements the FileCount on the given Fcb, which either deletes it or
-// schedules it for garbage collection if the FileCount becomes 0.
-NTSTATUS
-DokanFreeFCB(__in PDokanVCB Vcb, __in PDokanFCB Fcb);
-
-// Starts the FCB garbage collector thread for the given volume. If the
-// Vcb->FcbGarbageCollectorThread is NULL after this then it could not be started.
-VOID DokanStartFcbGarbageCollector(PDokanVCB Vcb);
-
-// Schedules the given FCB for garbage collection, and returns whether
-// scheduling it was successful. Currently it would only fail if garbage
-// collection is not enabled. It must be called with the VCB locked RW.
-BOOLEAN DokanScheduleFcbForGarbageCollection(__in PDokanVCB Vcb,
-                                             __in PDokanFCB Fcb);
-
-// Cancels the scheduled garbage collection of the given FCB. This is a no-op if
-// collection was never scheduled. It must be called with the VCB locked RW.
-VOID DokanCancelFcbGarbageCollection(__in PDokanFCB Fcb);
-
-// Forces FCB garbage collection (if enabled) and returns whether anything was
-// deleted as a consequence. This must be called with the VCB locked RW.
-BOOLEAN DokanForceFcbGarbageCollection(__in PDokanVCB Vcb);
-
-// Deletes the given FCB with no questions asked. This should only be used as a
-// helper by e.g. the garbage collector, and not by an I/O handling function.
-// The VCB and FCB must both be locked RW when this is called. After it returns,
-// do not unlock the FCB.
-VOID DokanDeleteFcb(__in PDokanVCB Vcb, __in PDokanFCB Fcb);
 
 PDokanCCB DokanAllocateCCB(__in PDokanDCB Dcb, __in PDokanFCB Fcb);
 
@@ -1143,49 +1081,14 @@ PMOUNT_ENTRY FindMountEntryByName(__in PDOKAN_GLOBAL DokanGlobal,
                                   __in PUNICODE_STRING UNCName,
                                   __in BOOLEAN LockGlobal);
 
-VOID PrintIdType(__in VOID *Id);
-
 NTSTATUS
 DokanAllocateMdl(__in PIRP Irp, __in ULONG Length);
 
 VOID DokanFreeMdl(__in PIRP Irp);
 
-// Duplicates the given null-terminated string into a new UNICODE_STRING.
-PUNICODE_STRING DokanAllocateUnicodeString(__in PCWSTR String);
-
-// Allocates a new UNICODE_STRING and then deep copies the given one into it.
-PUNICODE_STRING DokanAllocDuplicateString(__in const UNICODE_STRING* Src);
-
-// Performs a deep copy of a UNICODE_STRING, where the actual destination
-// UNICODE_STRING struct already exists. If the destination struct has a
-// buffer already allocated, this function deletes it.
-BOOLEAN DokanDuplicateUnicodeString(__out PUNICODE_STRING Dest,
-                                    __in const UNICODE_STRING* Src);
-
-// Wraps the given raw string as a UNICODE_STRING with no copying.
-inline UNICODE_STRING DokanWrapUnicodeString(__in WCHAR* Buffer,
-                                             __in USHORT Length) {
-  UNICODE_STRING result;
-  result.Buffer = Buffer;
-  result.Length = Length;
-  result.MaximumLength = Length;
-  return result;
-}
-
-BOOLEAN StartsWith(__in const UNICODE_STRING* Str,
-                   __in const UNICODE_STRING* Prefix);
-
-// Returns TRUE if the given string starts with "\DosDevices\"
-BOOLEAN StartsWithDosDevicesPrefix(__in const UNICODE_STRING* Str);
-
-// Returns TRUE if the given string is in the form "\DosDevices\C:" with any
-// drive letter.
-BOOLEAN IsMountPointDriveLetter(__in const UNICODE_STRING* MountPoint);
-
 ULONG PointerAlignSize(ULONG sizeInBytes);
 
 VOID DokanCreateMountPoint(__in PDokanDCB Dcb);
-NTSTATUS DokanSendVolumeArrivalNotification(PUNICODE_STRING DeviceName);
 
 VOID FlushFcb(__in PDokanFCB fcb, __in_opt PFILE_OBJECT fileObject);
 
@@ -1227,9 +1130,6 @@ __inline VOID DokanClearFlag(PULONG Flags, ULONG FlagBit) {
 #define DokanCCBFlagsIsSet DokanFCBFlagsIsSet
 #define DokanCCBFlagsSetBit DokanFCBFlagsSetBit
 #define DokanCCBFlagsClearBit DokanFCBFlagsClearBit
-
-ULONG DokanSearchWcharinUnicodeStringWithUlong(__in PUNICODE_STRING inputPUnicodeString, __in WCHAR targetWchar,
-	__in ULONG offsetPosition, __in int isIgnoreTargetWchar);
 
 // Logs the occurrence of the given type of IRP in the oplock debug info of the
 // FCB.

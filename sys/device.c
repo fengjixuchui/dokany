@@ -21,7 +21,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
-#include "irp_buffer_helper.h"
+#include "util/irp_buffer_helper.h"
+#include "util/str.h"
 
 #include <mountdev.h>
 #include <mountmgr.h>
@@ -469,6 +470,12 @@ DiskDeviceControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       DokanLogInfo(&logger, L"Link created when unmount is pending; ignoring.");
       break;
     }
+    if (!dcb->PersistentSymbolicLinkName &&
+        StartsWithVolumeGuidPrefix(&mountdevNameString)) {
+      dcb->PersistentSymbolicLinkName =
+          DokanAllocDuplicateString(&mountdevNameString);
+      break;
+    }
     if (!StartsWithDosDevicesPrefix(&mountdevNameString)) {
       DokanLogInfo(&logger, L"Link name is not under DosDevices; ignoring.");
       break;
@@ -765,7 +772,8 @@ DiskDeviceControlWithLock(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
 
   status = IoAcquireRemoveLock(&dcb->RemoveLock, Irp);
   if (!NT_SUCCESS(status)) {
-    DDbgPrint("IoAcquireRemoveLock failed with %#x", status);
+    DDbgPrint("IoAcquireRemoveLock failed with %#x %ls", status,
+              DokanGetNTSTATUSStr(status));
     return STATUS_INSUFFICIENT_RESOURCES;
   }
 

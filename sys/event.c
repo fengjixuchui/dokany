@@ -21,7 +21,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
-#include "irp_buffer_helper.h"
+#include "util/irp_buffer_helper.h"
+#include "util/mountmgr.h"
+#include "util/str.h"
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, DokanOplockComplete)
@@ -565,7 +567,8 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   BOOLEAN oplocksDisabled = FALSE;
   BOOLEAN fcbGcEnabled = FALSE;
   ULONG sessionId = (ULONG)-1;
-  BOOL startFailure = FALSE;
+  BOOLEAN startFailure = FALSE;
+  BOOLEAN isMountPointDriveLetter = FALSE;
 
   DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, 0);
 
@@ -607,9 +610,9 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     startFailure = TRUE;
   }
 
-  if (DokanStringChar(eventStart->MountPoint,
+  if (DokanSearchStringChar(eventStart->MountPoint,
                         sizeof(eventStart->MountPoint), '\0') == -1 ||
-      DokanStringChar(eventStart->UNCName,
+      DokanSearchStringChar(eventStart->UNCName,
                         sizeof(eventStart->UNCName), '\0') == -1) {
     DokanLogInfo(&logger, L"MountPoint / UNCName provided are not null "
                           L"terminated in event start.");
@@ -741,6 +744,8 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     return DokanLogError(&logger, status, L"Disk device creation failed.");
   }
 
+  isMountPointDriveLetter = IsMountPointDriveLetter(dcb->MountPoint);
+
   dcb->OplocksDisabled = oplocksDisabled;
   dcb->FileLockInUserMode = fileLockUserMode;
   dcb->FcbGarbageCollectionIntervalMs = fcbGcEnabled ? 2000 : 0;
@@ -790,6 +795,32 @@ DokanEventStart(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
   KeLeaveCriticalRegion();
 
   IoVerifyVolume(dcb->DeviceObject, FALSE);
+
+  if (useMountManager) {
+    if (!isMountPointDriveLetter && dcb->PersistentSymbolicLinkName) {
+      // Set our existing directory path as reparse point.
+      // It needs to be done outside IoVerifyVolume/DokanMountVolume as the
+      // MountManager will also call IoVerifyVolume on the device which will
+      // lead on a deadlock while trying to acquire the MountManager database.
+      ULONG setReparseInputlength = 0;
+      PCHAR setReparseInput = CreateSetReparsePointRequest(
+          dcb->PersistentSymbolicLinkName, &setReparseInputlength);
+      if (setReparseInput) {
+        status = SendDirectoryFsctl(DeviceObject, dcb->MountPoint,
+                                    FSCTL_SET_REPARSE_POINT, setReparseInput,
+                                    setReparseInputlength);
+        ExFreePool(setReparseInput);
+        if (NT_SUCCESS(status)) {
+          // Inform MountManager of the new mount point.
+          NotifyDirectoryMountPointCreated(dcb);
+        } else {
+          DokanLogError(&logger, status,
+                        L"Failed to set reparse point on MountPoint %wZ",
+                        dcb->MountPoint);
+        }
+      }
+    }
+  }
 
   Irp->IoStatus.Status = STATUS_SUCCESS;
   Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);

@@ -21,8 +21,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+#include "util/str.h"
 
-#include "dokanfs_msg.h"
+#include <mountmgr.h>
 
 static VOID InitMultiVersionResources();
 
@@ -32,7 +33,6 @@ static VOID InitMultiVersionResources();
 #pragma alloc_text(PAGE, DokanUnload)
 #endif
 
-ULONG g_Debug = DOKAN_DEBUG_NONE;
 LOOKASIDE_LIST_EX g_DokanCCBLookasideList;
 LOOKASIDE_LIST_EX g_DokanFCBLookasideList;
 LOOKASIDE_LIST_EX g_DokanEResourceLookasideList;
@@ -40,10 +40,6 @@ BOOLEAN g_FixFileNameForReparseMountPoint;
 
 NPAGED_LOOKASIDE_LIST DokanIrpEntryLookasideList;
 ULONG DokanMdlSafePriority = 0;
-UNICODE_STRING FcbFileNameNull;
-
-static const UNICODE_STRING dosDevicesPrefix =
-    RTL_CONSTANT_STRING(L"\\DosDevices\\");
 
 FAST_IO_DISPATCH FastIoDispatch;
 FAST_IO_CHECK_IF_POSSIBLE DokanFastIoCheckIfPossible;
@@ -175,7 +171,8 @@ DokanLookasideCreate(LOOKASIDE_LIST_EX *pCache, size_t cbElement) {
       pCache, NULL, NULL, NonPagedPool, 0, cbElement, TAG, 0);
 
   if (!NT_SUCCESS(Status)) {
-    DDbgPrint("ExInitializeLookasideListEx failed, Status (0x%x)", Status);
+    DDbgPrint("ExInitializeLookasideListEx failed, Status (0x%x) %ls\n", Status,
+              DokanGetNTSTATUSStr(Status));
     return FALSE;
   }
 
@@ -198,6 +195,7 @@ VOID CleanupGlobalDiskDevice(PDOKAN_GLOBAL dokanGlobal) {
   IoDeleteDevice(dokanGlobal->FsCdDeviceObject);
   IoDeleteDevice(dokanGlobal->DeviceObject);
   ExDeleteResourceLite(&dokanGlobal->Resource);
+  ExDeleteResourceLite(&dokanGlobal->MountManagerLock);
 }
 
 VOID InitMultiVersionResources() {
@@ -323,8 +321,8 @@ Return Value:
 
   if (!NT_SUCCESS(status)) {
     CleanupGlobalDiskDevice(dokanGlobal);
-    DDbgPrint("  FsRtlRegisterFileSystemFilterCallbacks returned 0x%x\n",
-              status);
+    DDbgPrint("  FsRtlRegisterFileSystemFilterCallbacks returned 0x%x %ls\n",
+              status, DokanGetNTSTATUSStr(status));
     return status;
   }
 
@@ -457,156 +455,6 @@ NTSTATUS DokanCheckOplock(
   return STATUS_SUCCESS;
 }
 
-#define PrintStatus(val, flag)                                                 \
-  if (val == flag)                                                             \
-  DDbgPrint("  status = " #flag "\n")
-
-#define DOKAN_LOG_MAX_CHAR_COUNT 2048
-#define DOKAN_LOG_MAX_PACKET_BYTES \
-    (ERROR_LOG_MAXIMUM_SIZE - sizeof(IO_ERROR_LOG_PACKET))
-#define DOKAN_LOG_MAX_PACKET_NONNULL_CHARS \
-    (DOKAN_LOG_MAX_PACKET_BYTES / sizeof(WCHAR) - 1)
-
-VOID DokanPrintToSysLog(__in PDRIVER_OBJECT DriverObject,
-                        __in UCHAR MajorFunctionCode,
-                        __in NTSTATUS MessageId,
-                        __in NTSTATUS Status,
-                        __in LPCTSTR Format,
-                        __in va_list Args) {
-  NTSTATUS status = STATUS_SUCCESS;
-  PIO_ERROR_LOG_PACKET packet = NULL;
-  WCHAR *message = NULL;
-  size_t messageCapacity = DOKAN_LOG_MAX_CHAR_COUNT;
-  size_t messageCharCount = 0;
-  size_t messageCharsWritten = 0;
-  size_t packetCount = 0;
-  size_t i = 0;
-  UCHAR packetCharCount = 0;
-  UCHAR packetSize = 0;
-
-  __try {
-    message = DokanAlloc(sizeof(WCHAR) * messageCapacity);
-    if (message == NULL) {
-      DDbgPrint("Failed to allocate message of capacity %d\n", messageCapacity);
-      __leave;
-    }
-
-    status = RtlStringCchVPrintfW(message, messageCapacity, Format, Args);
-    if (status == STATUS_BUFFER_OVERFLOW) {
-      // In this case we want to at least log what we can fit.
-      DDbgPrint("Log message was larger than DOKAN_LOG_MAX_CHAR_COUNT."
-                " Format: %S\n", Format);
-    } else if (status != STATUS_SUCCESS) {
-      DDbgPrint("Failed to generate log message with format: %S; status: %x\n",
-                Format, status);
-      __leave;
-    }
-
-    status = RtlStringCchLengthW(message, messageCapacity, &messageCharCount);
-    if (status != STATUS_SUCCESS) {
-      DDbgPrint("Failed to determine message length, status: %x\n", status);
-      __leave;
-    }
-
-    packetCount = messageCharCount / DOKAN_LOG_MAX_PACKET_NONNULL_CHARS;
-    if (messageCharCount % DOKAN_LOG_MAX_PACKET_NONNULL_CHARS != 0) {
-      ++packetCount;
-    }
-
-    for (i = 0; i < packetCount; i++) {
-      packetCharCount = (UCHAR)min(messageCharCount - messageCharsWritten,
-                                   DOKAN_LOG_MAX_PACKET_NONNULL_CHARS);
-      packetSize =
-          sizeof(IO_ERROR_LOG_PACKET) + sizeof(WCHAR) * (packetCharCount + 1);
-      packet = IoAllocateErrorLogEntry(DriverObject, packetSize);
-      if (packet == NULL) {
-        DDbgPrint("Failed to allocate packet of size %d\n", packetSize);
-        __leave;
-      }
-      RtlZeroMemory(packet, packetSize);
-      packet->MajorFunctionCode = MajorFunctionCode;
-      packet->NumberOfStrings = 1;
-      packet->StringOffset =
-          (USHORT)((char *)&packet->DumpData[0] - (char *)packet);
-      packet->ErrorCode = MessageId;
-      packet->FinalStatus = Status;
-      RtlCopyMemory(&packet->DumpData[0], message + messageCharsWritten,
-                    sizeof(WCHAR) * packetCharCount);
-      IoWriteErrorLogEntry(packet); // Destroys packet.
-      packet = NULL;
-      messageCharsWritten += packetCharCount;
-    }
-  } __finally {
-    if (message != NULL) {
-      ExFreePool(message);
-    }
-  }
-}
-
-NTSTATUS DokanLogError(__in PDOKAN_LOGGER Logger,
-                       __in NTSTATUS Status,
-                       __in LPCTSTR Format,
-                       ...) {
-  if (g_Debug & DOKAN_DEBUG_DEFAULT) {
-    va_list args;
-    va_start(args, Format);
-    DokanPrintToSysLog(Logger->DriverObject, Logger->MajorFunctionCode,
-                       DOKANFS_ERROR_MSG, Status, Format, args);
-    va_end(args);
-  }
-  return Status;
-}
-
-VOID DokanLogInfo(__in PDOKAN_LOGGER Logger, __in LPCTSTR Format, ...) {
-  if (g_Debug & DOKAN_DEBUG_DEFAULT) {
-    va_list args;
-    va_start(args, Format);
-    DokanPrintToSysLog(Logger->DriverObject, Logger->MajorFunctionCode,
-                       DOKANFS_INFO_MSG, STATUS_SUCCESS, Format, args);
-    va_end(args);
-  }
-}
-
-VOID DokanCaptureBackTrace(__out PDokanBackTrace Trace) {
-  PVOID rawTrace[4];
-  USHORT count = RtlCaptureStackBackTrace(1, 4, rawTrace, NULL);
-  Trace->Address = (ULONG64)((count > 0) ? rawTrace[0] : 0);
-  Trace->ReturnAddresses =
-        (((count > 1) ? ((ULONG64)rawTrace[1] & 0xfffff) : 0) << 40)
-      | (((count > 2) ? ((ULONG64)rawTrace[2] & 0xfffff) : 0) << 20)
-      |  ((count > 3) ? ((ULONG64)rawTrace[3] & 0xfffff) : 0);
-}
-
-VOID DokanPrintNTStatus(NTSTATUS Status) {
-  DDbgPrint("  status = 0x%x\n", Status);
-
-  PrintStatus(Status, STATUS_SUCCESS);
-  PrintStatus(Status, STATUS_PENDING);
-  PrintStatus(Status, STATUS_NO_MORE_FILES);
-  PrintStatus(Status, STATUS_END_OF_FILE);
-  PrintStatus(Status, STATUS_NO_SUCH_FILE);
-  PrintStatus(Status, STATUS_NOT_IMPLEMENTED);
-  PrintStatus(Status, STATUS_BUFFER_OVERFLOW);
-  PrintStatus(Status, STATUS_FILE_IS_A_DIRECTORY);
-  PrintStatus(Status, STATUS_SHARING_VIOLATION);
-  PrintStatus(Status, STATUS_OBJECT_NAME_INVALID);
-  PrintStatus(Status, STATUS_OBJECT_NAME_NOT_FOUND);
-  PrintStatus(Status, STATUS_OBJECT_NAME_COLLISION);
-  PrintStatus(Status, STATUS_OBJECT_PATH_INVALID);
-  PrintStatus(Status, STATUS_OBJECT_PATH_NOT_FOUND);
-  PrintStatus(Status, STATUS_OBJECT_PATH_SYNTAX_BAD);
-  PrintStatus(Status, STATUS_ACCESS_DENIED);
-  PrintStatus(Status, STATUS_ACCESS_VIOLATION);
-  PrintStatus(Status, STATUS_INVALID_PARAMETER);
-  PrintStatus(Status, STATUS_INVALID_USER_BUFFER);
-  PrintStatus(Status, STATUS_INVALID_HANDLE);
-  PrintStatus(Status, STATUS_INSUFFICIENT_RESOURCES);
-  PrintStatus(Status, STATUS_DEVICE_DOES_NOT_EXIST);
-  PrintStatus(Status, STATUS_INVALID_DEVICE_REQUEST);
-  PrintStatus(Status, STATUS_VOLUME_DISMOUNTED);
-  PrintStatus(Status, STATUS_NO_SUCH_DEVICE);
-}
-
 VOID DokanCompleteIrpRequest(__in PIRP Irp, __in NTSTATUS Status,
                              __in ULONG_PTR Info) {
   if (Irp == NULL) {
@@ -654,7 +502,7 @@ NTSTATUS DokanNotifyReportChange0(__in PDokanFCB Fcb,
 
   // Alternate streams are supposed to use a different set of action
   // and filter values, but we do not expect the caller to be aware of this.
-  if (DokanUnicodeStringChar(FileName, L':') != -1) { //FileStream
+  if (DokanSearchUnicodeStringChar(FileName, L':') != -1) {  // FileStream
 
     //Convert file action to stream action
     switch (Action) {
@@ -728,33 +576,6 @@ NTSTATUS DokanNotifyReportChange(__in PDokanFCB Fcb, __in ULONG FilterMatch,
                                  __in ULONG Action) {
   ASSERT(Fcb != NULL);
   return DokanNotifyReportChange0(Fcb, &Fcb->FileName, FilterMatch, Action);
-}
-
-VOID PrintIdType(__in VOID *Id) {
-  if (Id == NULL) {
-    DDbgPrint("    IdType = NULL\n");
-    return;
-  }
-  switch (GetIdentifierType(Id)) {
-  case DGL:
-    DDbgPrint("    IdType = DGL\n");
-    break;
-  case DCB:
-    DDbgPrint("   IdType = DCB\n");
-    break;
-  case VCB:
-    DDbgPrint("   IdType = VCB\n");
-    break;
-  case FCB:
-    DDbgPrint("   IdType = FCB\n");
-    break;
-  case CCB:
-    DDbgPrint("   IdType = CCB\n");
-    break;
-  default:
-    DDbgPrint("   IdType = Unknown\n");
-    break;
-  }
 }
 
 BOOLEAN
@@ -1054,242 +875,24 @@ void OplockDebugRecordAtomicRequest(PDokanFCB Fcb) {
   InterlockedIncrement(&Fcb->OplockDebugInfo.AtomicRequestCount);
 }
 
-BOOLEAN DokanScheduleFcbForGarbageCollection(__in PDokanVCB Vcb,
-                                             __in PDokanFCB Fcb) {
-  DOKAN_INIT_LOGGER(logger, Vcb->Dcb->DeviceObject->DriverObject, 0);
-  if (Vcb->FcbGarbageCollectorThread == NULL) {
-    return FALSE;
-  }
-  if (Fcb->NextGarbageCollectableFcb.Flink != NULL) {
-    // This is probably not intentional but theoretically OK.
-    DokanLogInfo(&logger,
-                 L"Warning: scheduled an FCB for garbage collection when it is"
-                 L" already scheduled.");
-    return TRUE;
-  }
-  Fcb->GarbageCollectionGracePeriodPassed = FALSE;
-  InsertTailList(&Vcb->FcbGarbageList, &Fcb->NextGarbageCollectableFcb);
-  KeSetEvent(&Vcb->FcbGarbageListNotEmpty, IO_NO_INCREMENT, FALSE);
-  return TRUE;
-}
+VOID RunAsSystem(_In_ PKSTART_ROUTINE StartRoutine, PVOID StartContext) {
+  HANDLE handle;
+  PKTHREAD thread;
+  OBJECT_ATTRIBUTES objectAttribs;
 
-VOID DokanCancelFcbGarbageCollection(__in PDokanFCB Fcb) {
-  if (Fcb->NextGarbageCollectableFcb.Flink != NULL) {
-    ++Fcb->Vcb->VolumeMetrics.FcbGarbageCollectionCancellations;
-    RemoveEntryList(&Fcb->NextGarbageCollectableFcb);
-    Fcb->NextGarbageCollectableFcb.Flink = NULL;
-    Fcb->GarbageCollectionGracePeriodPassed = FALSE;
-    DokanFCBFlagsClearBit(Fcb, DOKAN_DELETE_ON_CLOSE);
-    DokanFCBFlagsClearBit(Fcb, DOKAN_FILE_DIRECTORY);
-  }
-}
-
-// Called with the VCB locked. Immediately deletes the FCBs that are ready to
-// delete. Returns how many are skipped due to having been scheduled too
-// recently. If Force is TRUE then all the scheduled ones are deleted, and the
-// return value is 0.
-ULONG DeleteFcbGarbageAndGetRemainingCount(__in PDokanVCB Vcb,
-                                           __in BOOLEAN Force) {
-  ULONG remainingCount = 0;
-  PLIST_ENTRY thisEntry = NULL;
-  PLIST_ENTRY nextEntry = NULL;
-  PDokanFCB nextFcb = NULL;
-  for (thisEntry = Vcb->FcbGarbageList.Flink;
-       thisEntry != &Vcb->FcbGarbageList; thisEntry = nextEntry) {
-    nextEntry = thisEntry->Flink;
-    nextFcb = CONTAINING_RECORD(thisEntry, DokanFCB,
-                                NextGarbageCollectableFcb);
-    // We want it to have been scheduled for at least one timer interval so
-    // that there is a guaranteed window of possible reuse, which achieves the
-    // performance gains we are aiming for with GC.
-    if (Force || nextFcb->GarbageCollectionGracePeriodPassed) {
-      RemoveEntryList(thisEntry);
-      DokanFCBLockRW(nextFcb);
-      DokanDeleteFcb(Vcb, nextFcb);
-    } else {
-      nextFcb->GarbageCollectionGracePeriodPassed = TRUE;
-      ++remainingCount;
-    }
-  }
-  ASSERT(!Force || remainingCount == 0);
-  // When an FCB gets deleted by a GC cycle already in progress at the time of
-  // its scheduling, there's no point in triggering a follow-up cycle for that
-  // one.
-  if (remainingCount == 0) {
-    KeClearEvent(&Vcb->FcbGarbageListNotEmpty);
-  }
-  return remainingCount;
-}
-
-BOOLEAN DokanForceFcbGarbageCollection(__in PDokanVCB Vcb) {
-  if (Vcb->FcbGarbageCollectorThread == NULL
-      || IsListEmpty(&Vcb->FcbGarbageList)) {
-    return FALSE;
-  }
-  ++Vcb->VolumeMetrics.ForcedFcbGarbageCollectionPasses;
-  DeleteFcbGarbageAndGetRemainingCount(Vcb, /*Force=*/TRUE);
-  return TRUE;
-}
-
-// Called when there are no pending garbage FCBs and we may need to wait
-// indefinitely for one to appear.
-NTSTATUS WaitForNewFcbGarbage(__in PDokanVCB Vcb) {
-  PVOID events[2];
-  events[0] = &Vcb->Dcb->ReleaseEvent;
-  events[1] = &Vcb->FcbGarbageListNotEmpty;
-  NTSTATUS status = KeWaitForMultipleObjects(2, events, WaitAny, Executive,
-                                             KernelMode, FALSE, NULL, NULL);
-  return status == STATUS_WAIT_1 ? STATUS_SUCCESS : STATUS_CANCELLED;
-}
-
-// Called when there are some pending garbage FCBs. This function keeps an eye
-// on them until they expire and then deletes them, returning when there are no
-// more pending ones.
-NTSTATUS AgeAndDeleteFcbGarbage(__in PDokanVCB Vcb, __in PKTIMER Timer) {
-  NTSTATUS status = STATUS_INVALID_PARAMETER;
-  ULONG pendingCount = 0;
-  PVOID events[2];
-  BOOLEAN waited = FALSE;
-  events[0] = &Vcb->Dcb->ReleaseEvent;
-  events[1] = Timer;
-  ++Vcb->VolumeMetrics.NormalFcbGarbageCollectionCycles;
-  for (;;) {
-    // Get rid of any garbage that is ready to delete.
-    DokanVCBLockRW(Vcb);
-    ++Vcb->VolumeMetrics.NormalFcbGarbageCollectionPasses;
-    pendingCount = DeleteFcbGarbageAndGetRemainingCount(Vcb, /*Force=*/FALSE);
-    DokanVCBUnlock(Vcb);
-    // If we have cleared out all the garbage, return so the garbage collector
-    // will do an indefinite wait for new garbage. But we wait at least once on
-    // the GC interval timer to avoid having multiple no-op cycles in one
-    // interval.
-    if (pendingCount == 0 && waited) {
-      status = STATUS_SUCCESS;
-      break;
-    }
-    // If there are any entries that haven't aged long enough, age them using
-    // the timer until they are ready.
-    status = KeWaitForMultipleObjects(2, events, WaitAny, Executive, KernelMode,
-                                      FALSE, NULL, NULL);
-    waited = TRUE;
-    if (status != STATUS_WAIT_1) {
-      status = STATUS_CANCELLED;
-      break;
-    }
-  }
-  return status;
-}
-
-// The thread function for the dedicated FCB garbage collection thread.
-VOID FcbGarbageCollectorThread(__in PVOID pVcb) {
-  KTIMER timer;
-  NTSTATUS status = STATUS_INVALID_PARAMETER;
-  LARGE_INTEGER timeout = {0};
-  PDokanVCB Vcb = pVcb;
-  DOKAN_INIT_LOGGER(logger, Vcb->Dcb->DeviceObject->DriverObject, 0);
-  KeInitializeTimerEx(&timer, SynchronizationTimer);
-  KeSetTimerEx(&timer, timeout, Vcb->Dcb->FcbGarbageCollectionIntervalMs, NULL);
-  DokanLogInfo(&logger, L"Starting FCB garbage collector with %lu ms interval.",
-               Vcb->Dcb->FcbGarbageCollectionIntervalMs);
-  for (;;) {
-    status = WaitForNewFcbGarbage(Vcb);
-    if (status != STATUS_SUCCESS) {
-      break;
-    }
-    status = AgeAndDeleteFcbGarbage(Vcb, &timer);
-    if (status != STATUS_SUCCESS) {
-      break;
-    }
-  }
-  DokanLogInfo(&logger, L"Stopping FCB garbage collector.");
-  KeCancelTimer(&timer);
-}
-
-void DokanStartFcbGarbageCollector(PDokanVCB Vcb) {
-  NTSTATUS status = STATUS_INVALID_PARAMETER;
-  HANDLE thread = NULL;
-  Vcb->FcbGarbageCollectorThread = NULL;
-  if (Vcb->Dcb->FcbGarbageCollectionIntervalMs == 0) {
-    return;
-  }
-  status = PsCreateSystemThread(&thread, THREAD_ALL_ACCESS, NULL, NULL, NULL,
-                                (PKSTART_ROUTINE)FcbGarbageCollectorThread,
-                                Vcb);
+  InitializeObjectAttributes(&objectAttribs, NULL, OBJ_KERNEL_HANDLE, NULL,
+                             NULL);
+  NTSTATUS status =
+      PsCreateSystemThread(&handle, THREAD_ALL_ACCESS, &objectAttribs, NULL,
+                           NULL, StartRoutine, StartContext);
   if (!NT_SUCCESS(status)) {
-    // Note: we will revert to shared_ptr-style deletion if the thread is NULL.
-    return;
+    DDbgPrint("PsCreateSystemThread failed: 0x%X %ls\n", status,
+              DokanGetNTSTATUSStr(status));
+  } else {
+    ObReferenceObjectByHandle(handle, THREAD_ALL_ACCESS, NULL, KernelMode,
+                              &thread, NULL);
+    ZwClose(handle);
+    KeWaitForSingleObject(thread, Executive, KernelMode, FALSE, NULL);
+    ObDereferenceObject(thread);
   }
-  ObReferenceObjectByHandle(thread, THREAD_ALL_ACCESS, NULL, KernelMode,
-                            (PVOID *)&Vcb->FcbGarbageCollectorThread, NULL);
-
-  ZwClose(thread);
-}
-
-PUNICODE_STRING DokanAllocDuplicateString(__in const UNICODE_STRING* Src) {
-  PUNICODE_STRING result = DokanAllocZero(sizeof(UNICODE_STRING));
-  if (!result) {
-    return NULL;
-  }
-  if (!DokanDuplicateUnicodeString(result, Src)) {
-    ExFreePool(result);
-    return NULL;
-  }
-  return result;
-}
-
-BOOLEAN DokanDuplicateUnicodeString(__out UNICODE_STRING* Dest,
-                                    __in const UNICODE_STRING* Src) {
-  if (Dest->Buffer) {
-    ExFreePool(Dest->Buffer);
-  }
-  Dest->Buffer = DokanAlloc(Src->MaximumLength);
-  if (!Dest->Buffer) {
-    Dest->Length = 0;
-    Dest->MaximumLength = 0;
-    return FALSE;
-  }
-  Dest->MaximumLength = Src->MaximumLength;
-  Dest->Length = Src->Length;
-  RtlCopyMemory(Dest->Buffer, Src->Buffer, Dest->MaximumLength);
-  return TRUE;
-}
-
-BOOLEAN StartsWith(__in const UNICODE_STRING* Str,
-                   __in const UNICODE_STRING* Prefix) {
-  if (Prefix == NULL || Prefix->Length == 0) {
-    return TRUE;
-  }
-
-  if (Str == NULL || Prefix->Length > Str->Length) {
-    return FALSE;
-  }
-
-  LPCWSTR prefixToUse, stringToCompareTo;
-  prefixToUse = Prefix->Buffer;
-  stringToCompareTo = Str->Buffer;
-
-  while (*prefixToUse) {
-    if (*prefixToUse++ != *stringToCompareTo++)
-      return FALSE;
-  }
-
-  return TRUE;
-}
-
-BOOLEAN StartsWithDosDevicesPrefix(__in const UNICODE_STRING* Str) {
-  return StartsWith(Str, &dosDevicesPrefix);
-}
-
-BOOLEAN IsMountPointDriveLetter(__in const UNICODE_STRING* MountPoint) {
-  size_t colonIndex = dosDevicesPrefix.Length / sizeof(WCHAR) + 1;
-  size_t driveLetterLength = dosDevicesPrefix.Length + 2 * sizeof(WCHAR);
-  BOOLEAN nonTerminatedDriveLetterLength =
-      MountPoint->Length == driveLetterLength;
-  BOOLEAN nullTerminatedDriveLetterLength =
-      MountPoint->Length == driveLetterLength + sizeof(WCHAR)
-      && MountPoint->Buffer[colonIndex + 1] == L'\0';
-  // Note: the size range is for an optional null char.
-  return StartsWithDosDevicesPrefix(MountPoint)
-      && (nonTerminatedDriveLetterLength || nullTerminatedDriveLetterLength)
-      && MountPoint->Buffer[colonIndex] == L':';
 }

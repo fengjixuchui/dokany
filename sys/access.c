@@ -20,7 +20,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
-#include "irp_buffer_helper.h"
+#include "util/irp_buffer_helper.h"
 
 NTSTATUS
 DokanGetAccessToken(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
@@ -107,7 +107,8 @@ DokanGetAccessToken(__in PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp) {
     status = ObOpenObjectByPointer(accessToken, 0, NULL, GENERIC_ALL,
                                    *SeTokenObjectType, KernelMode, &handle);
     if (!NT_SUCCESS(status)) {
-      DDbgPrint("  ObOpenObjectByPointer failed: 0x%x\n", status);
+      DDbgPrint("  ObOpenObjectByPointer failed: 0x%x %ls\n", status,
+                DokanGetNTSTATUSStr(status));
       __leave;
     }
 

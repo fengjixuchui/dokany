@@ -41,7 +41,7 @@ void memfs::run() {
   if (debug_log) {
     dokan_options.Options |= DOKAN_OPTION_STDERR | DOKAN_OPTION_DEBUG;
   } else {
-    spdlog::set_level(spdlog::level::off);
+    spdlog::set_level(spdlog::level::err);
   }
   // Mount type
   if (network_drive) {
@@ -76,10 +76,9 @@ void memfs::run() {
       throw std::runtime_error("Mount point error");
     case DOKAN_VERSION_ERROR:
       throw std::runtime_error("Version error");
-    default: {
+    default:
       spdlog::error(L"DokanMain failed with {}", status);
       throw std::runtime_error("Unknown error"); // add error status
-    }
   }
 }
 

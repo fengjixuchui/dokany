@@ -384,6 +384,7 @@ Return Value:
   BOOLEAN EventContextConsumed = FALSE;
   DWORD disposition = 0;
   BOOLEAN fcbLocked = FALSE;
+  BOOLEAN caseInSensitive = TRUE;
   DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, IRP_MJ_CREATE);
 
   PAGED_CODE();
@@ -587,6 +588,8 @@ Return Value:
       __leave;
     }
 
+    caseInSensitive = !dcb->CaseSensitive;
+
     // this memory is freed by DokanGetFCB if needed
     // "+ sizeof(WCHAR)" is for the last NULL character
     fileName = DokanAllocZero(fileNameLength + sizeof(WCHAR));
@@ -653,11 +656,9 @@ Return Value:
           fileName = NULL;
           __leave;
         }
-        fcb = DokanGetFCB(vcb, parentDir, parentDirLength,
-                          FlagOn(irpSp->Flags, SL_CASE_SENSITIVE));
+        fcb = DokanGetFCB(vcb, parentDir, parentDirLength, caseInSensitive);
       } else {
-        fcb = DokanGetFCB(vcb, fileName, fileNameLength,
-                          FlagOn(irpSp->Flags, SL_CASE_SENSITIVE));
+        fcb = DokanGetFCB(vcb, fileName, fileNameLength, caseInSensitive);
       }
       if (fcb == NULL) {
         status = STATUS_INSUFFICIENT_RESOURCES;

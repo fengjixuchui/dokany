@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -174,7 +175,8 @@ VOID DispatchQuerySecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
     }
   }
 
-  SendEventInformation(Handle, eventInfo, eventInfoLength, DokanInstance);
+  SendEventInformation(Handle, eventInfo, eventInfoLength);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }
 
@@ -213,6 +215,7 @@ VOID DispatchSetSecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
     eventInfo->BufferLength = 0;
   }
 
-  SendEventInformation(Handle, eventInfo, eventInfoLength, DokanInstance);
+  SendEventInformation(Handle, eventInfo, eventInfoLength);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }

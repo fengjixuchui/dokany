@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2017 - 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 - 2018 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -296,6 +296,18 @@ typedef struct _DokanDiskControlBlock {
   // exponentially slowing down procedures like zip file extraction due to
   // repeatedly rebuilding state that they attach to the FCB header.
   ULONG FcbGarbageCollectionIntervalMs;
+
+  // CaseSenitive FileName: NTFS can look to be case-insensitive
+  // but in some situation it can also be case-sensitive :
+  // * NTFS keep the filename casing used during Create internally.
+  // * Open "MyFile" on NTFS can open "MYFILE" if it exists.
+  // * FILE_FLAG_POSIX_SEMANTICS (IRP_MJ_CREATE: SL_CASE_SENSITIVE)
+  //   can be used during Create to make the lookup case-sensitive.
+  // * Since Win10, NTFS can have specific directories
+  //   case-sensitive / insensitive, even if the device tags says otherwise.
+  // Dokan choose to support case-sensitive or case-insensitive filesystem
+  // but not those NTFS specific scenarios.
+  BOOLEAN CaseSensitive;
 
 } DokanDCB, *PDokanDCB;
 

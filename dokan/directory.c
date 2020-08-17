@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -382,7 +383,7 @@ LONG MatchFiles(PEVENT_CONTEXT EventContext, PEVENT_INFORMATION EventInfo,
   PVOID currentBuffer = EventInfo->Buffer;
   PVOID lastBuffer = currentBuffer;
   ULONG index = 0;
-
+  BOOL caseSensitive = FALSE;
   PWCHAR pattern = NULL;
 
   // search patten is specified
@@ -392,6 +393,9 @@ LONG MatchFiles(PEVENT_CONTEXT EventContext, PEVENT_INFORMATION EventInfo,
         (SIZE_T)&EventContext->Operation.Directory.SearchPatternBase[0] +
         (SIZE_T)EventContext->Operation.Directory.SearchPatternOffset);
   }
+
+  caseSensitive =
+      DokanInstance->DokanOptions->Options & DOKAN_OPTION_CASE_SENSITIVE;
 
   listHead = FindDataList;
 
@@ -408,8 +412,8 @@ LONG MatchFiles(PEVENT_CONTEXT EventContext, PEVENT_INFORMATION EventInfo,
               EventContext->Operation.Directory.FileIndex, index);
 
     // pattern is not specified or pattern match is ignore cases
-    if (!pattern ||
-        DokanIsNameInExpression(pattern, find->FindData.cFileName, TRUE)) {
+    if (!pattern || DokanIsNameInExpression(pattern, find->FindData.cFileName,
+                                            !caseSensitive)) {
 
       if (EventContext->Operation.Directory.FileIndex <= index) {
         // index+1 is very important, should use next entry index
@@ -548,7 +552,8 @@ VOID DispatchDirectoryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
     // send directory info to driver
     eventInfo->BufferLength = 0;
     eventInfo->Status = STATUS_NOT_IMPLEMENTED;
-    SendEventInformation(Handle, eventInfo, sizeOfEventInfo, DokanInstance);
+    SendEventInformation(Handle, eventInfo, sizeOfEventInfo);
+    ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
     free(eventInfo);
     return;
   }
@@ -564,7 +569,8 @@ VOID DispatchDirectoryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
     } else {
       eventInfo->BufferLength = 0;
       eventInfo->Status = STATUS_NO_MEMORY;
-      SendEventInformation(Handle, eventInfo, sizeOfEventInfo, DokanInstance);
+      SendEventInformation(Handle, eventInfo, sizeOfEventInfo);
+      ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
       free(eventInfo);
       return;
     }
@@ -666,7 +672,8 @@ VOID DispatchDirectoryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
   openInfo->UserContext = fileInfo.Context;
 
   // send directory information to driver
-  SendEventInformation(Handle, eventInfo, sizeOfEventInfo, DokanInstance);
+  SendEventInformation(Handle, eventInfo, sizeOfEventInfo);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }
 

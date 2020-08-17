@@ -19,6 +19,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "fcb.h"
+#include "str.h"
 
 const UNICODE_STRING g_KeepAliveFileName =
     RTL_CONSTANT_STRING(DOKAN_KEEPALIVE_FILE_NAME);
@@ -92,15 +93,10 @@ PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
 }
 
 PDokanFCB DokanGetFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
-                      __in ULONG FileNameLength, BOOLEAN CaseSensitive) {
+                      __in ULONG FileNameLength, BOOLEAN CaseInSensitive) {
   PLIST_ENTRY thisEntry, nextEntry, listHead;
   PDokanFCB fcb = NULL;
-
-  UNICODE_STRING fn;
-
-  fn.Length = (USHORT)FileNameLength;
-  fn.MaximumLength = fn.Length + sizeof(WCHAR);
-  fn.Buffer = FileName;
+  UNICODE_STRING fn = DokanWrapUnicodeString(FileName, FileNameLength);
 
   DokanVCBLockRW(Vcb);
 
@@ -115,10 +111,10 @@ PDokanFCB DokanGetFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
 
     fcb = CONTAINING_RECORD(thisEntry, DokanFCB, NextFCB);
     DDbgPrint("  DokanGetFCB has entry FileName: %wZ FileCount: %lu. Looking "
-              "for %ls\n",
-        &fcb->FileName, fcb->FileCount, FileName);
+              "for %ls CaseInSensitive %d\n",
+              &fcb->FileName, fcb->FileCount, FileName, CaseInSensitive);
     if (fcb->FileName.Length == FileNameLength  // FileNameLength in bytes
-        && RtlEqualUnicodeString(&fn, &fcb->FileName, !CaseSensitive)) {
+        && RtlEqualUnicodeString(&fn, &fcb->FileName, CaseInSensitive)) {
       // we have the FCB which is already allocated and used
       DDbgPrint("  Found existing FCB for %ls\n", FileName);
       break;
@@ -152,9 +148,7 @@ PDokanFCB DokanGetFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
 
     // we already have FCB
   } else {
-    DokanCancelFcbGarbageCollection(fcb);
-    // FileName (argument) is never used and must be freed
-    ExFreePool(FileName);
+    DokanCancelFcbGarbageCollection(fcb, &fn);
   }
 
   InterlockedIncrement(&fcb->FileCount);
@@ -263,15 +257,27 @@ BOOLEAN DokanScheduleFcbForGarbageCollection(__in PDokanVCB Vcb,
   return TRUE;
 }
 
-VOID DokanCancelFcbGarbageCollection(__in PDokanFCB Fcb) {
+VOID DokanCancelFcbGarbageCollection(__in PDokanFCB Fcb,
+                                     _Inout_ PUNICODE_STRING NewFileName) {
   if (Fcb->NextGarbageCollectableFcb.Flink != NULL) {
     ++Fcb->Vcb->VolumeMetrics.FcbGarbageCollectionCancellations;
+    // Update the case of the file name and clear flags. Note that there cannot
+    // be concurrent use of an FCB in the GC list while we are in this function.
+    ASSERT(Fcb->FileName.Length == NewFileName->Length);
+    ExFreePool(Fcb->FileName.Buffer);
+    Fcb->FileName = *NewFileName;
     RemoveEntryList(&Fcb->NextGarbageCollectableFcb);
     Fcb->NextGarbageCollectableFcb.Flink = NULL;
     Fcb->GarbageCollectionGracePeriodPassed = FALSE;
     DokanFCBFlagsClearBit(Fcb, DOKAN_DELETE_ON_CLOSE);
     DokanFCBFlagsClearBit(Fcb, DOKAN_FILE_DIRECTORY);
+  } else {
+    // It's not actually scheduled for GC, so this function is a no-op aside
+    // from its obligation to clean up the string.
+    ExFreePool(NewFileName->Buffer);
   }
+  NewFileName->Buffer = NULL;
+  NewFileName->Length = 0;
 }
 
 // Called with the VCB locked. Immediately deletes the FCBs that are ready to

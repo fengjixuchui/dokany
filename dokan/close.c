@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -39,20 +40,15 @@ VOID DispatchClose(HANDLE Handle, PEVENT_CONTEXT EventContext,
 
   DbgPrint("###Close %04d\n", openInfo != NULL ? openInfo->EventId : -1);
 
-  if (DokanInstance->DokanOperations->CloseFile) {
-    // ignore return value
-    DokanInstance->DokanOperations->CloseFile(
-        EventContext->Operation.Close.FileName, &fileInfo);
-  }
-
   // do not send it to the driver
   // SendEventInformation(Handle, eventInfo, length);
 
   if (openInfo != NULL) {
     EnterCriticalSection(&DokanInstance->CriticalSection);
+    openInfo->FileName = _wcsdup(EventContext->Operation.Close.FileName);
     openInfo->OpenCount--;
     LeaveCriticalSection(&DokanInstance->CriticalSection);
   }
-  ReleaseDokanOpenInfo(eventInfo, DokanInstance);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }

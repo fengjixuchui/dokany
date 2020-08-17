@@ -55,7 +55,7 @@ extern "C" {
  */
 /** @{ */
 
-/** The current Dokan version (ver 1.2.0). \ref DOKAN_OPTIONS.Version */
+/** The current Dokan version (140 means ver 1.4.0). \ref DOKAN_OPTIONS.Version */
 #define DOKAN_VERSION 140
 /** Minimum Dokan version (ver 1.1.0) accepted. */
 #define DOKAN_MINIMUM_COMPATIBLE_VERSION 110
@@ -87,7 +87,12 @@ extern "C" {
 #define DOKAN_OPTION_WRITE_PROTECT 8
 /** Use network drive - Dokan network provider needs to be installed */
 #define DOKAN_OPTION_NETWORK 16
-/** Use removable drive */
+/**
+ * Use removable drive
+ * Be aware that on some environments, the userland application will be denied
+ * to communicate with the drive which will result in a unwanted unmount.
+ * \see <a href="https://github.com/dokan-dev/dokany/issues/843">Issue #843</a>
+ */
 #define DOKAN_OPTION_REMOVABLE 32
 /** Use mount manager */
 #define DOKAN_OPTION_MOUNT_MANAGER 64
@@ -112,6 +117,13 @@ extern "C" {
  * repeatedly rebuilding state that they attach to the FCB header.
  */
 #define DOKAN_OPTION_ENABLE_FCB_GARBAGE_COLLECTION 2048
+/**
+ * Enable Case sensitive path.
+ * By default all path are case insensitive.
+ * For case sensitive: \dir\File & \diR\file are different files
+ * but for case insensitive they are the same.
+ */
+#define DOKAN_OPTION_CASE_SENSITIVE 4096
 
 /** @} */
 
@@ -140,6 +152,7 @@ typedef struct _DOKAN_OPTIONS {
    * Max timeout in milliseconds of each request before Dokan gives up to wait events to complete.
    * A timeout request is a sign that the userland implementation is no longer able to properly manage requests in time.
    * The driver will therefore unmount the device when a timeout trigger in order to keep the system stable.
+   * The default timeout value is 15 seconds.
    */
   ULONG Timeout;
   /** Allocation Unit Size of the volume. This will affect the file size. */

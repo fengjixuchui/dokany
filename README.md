@@ -1,4 +1,5 @@
 # Dokany
+[![Github All Releases](https://img.shields.io/github/downloads/dokan-dev/dokany/total.svg)](https://github.com/dokan-dev/dokany/releases)
 [![Build status](https://ci.appveyor.com/api/projects/status/4tpt4v8btyahh3le/branch/master?svg=true)](https://ci.appveyor.com/project/Maxhy/dokany/branch/master)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dokany&metric=alert_status)](https://sonarcloud.io/dashboard?id=dokany)
 [![Codacy Badge](https://api.codacy.com/project/badge/Grade/43afb600ca75462e94d9484c32090135)](https://www.codacy.com/app/Liryna/dokany?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=dokan-dev/dokany&amp;utm_campaign=Badge_Grade)
@@ -94,7 +95,7 @@ advantage of this approach is that it allows programmers to develop file systems
 in user mode which is safe and easy to debug.
  
 To learn more about Dokan file system development, see the
-[![API documentation](https://img.shields.io/badge/Documentation-API-green.svg)](https://dokan-dev.github.io/dokany-doc/html/)and the [samples](https://github.com/dokan-dev/dokany/tree/master/samples), especially [dokan_memfs](https://github.com/dokan-dev/dokany/tree/master/samples/dokan_memfs).
+[![API documentation](https://img.shields.io/badge/Documentation-API-green.svg)](https://dokan-dev.github.io/dokany-doc/html/) and the [samples](https://github.com/dokan-dev/dokany/tree/master/samples), especially [dokan_memfs](https://github.com/dokan-dev/dokany/tree/master/samples/dokan_memfs).
 
 ## Build
 In short, download and install the

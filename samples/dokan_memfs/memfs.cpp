@@ -40,6 +40,9 @@ void memfs::run() {
   dokan_options.MountPoint = mount_point;
   if (debug_log) {
     dokan_options.Options |= DOKAN_OPTION_STDERR | DOKAN_OPTION_DEBUG;
+    if (dispatch_driver_logs) {
+      dokan_options.Options |= DOKAN_OPTION_DISPATCH_DRIVER_LOGS;
+    }
   } else {
     spdlog::set_level(spdlog::level::err);
   }
@@ -49,11 +52,20 @@ void memfs::run() {
     if (unc_name[0]) {
       dokan_options.UNCName = unc_name;
     }
+    if (enable_network_unmount) {
+      dokan_options.Options |= DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE;
+    }
   } else if (removable_drive) {
     dokan_options.Options |= DOKAN_OPTION_REMOVABLE;
   } else {
     dokan_options.Options |= DOKAN_OPTION_MOUNT_MANAGER;
   }
+  
+  if (current_session
+      && (dokan_options.Options & DOKAN_OPTION_MOUNT_MANAGER) == 0) {
+    dokan_options.Options |= DOKAN_OPTION_CURRENT_SESSION;
+  }
+  
   dokan_options.ThreadCount = thread_number;
   dokan_options.Timeout = timeout;
   dokan_options.GlobalContext = reinterpret_cast<ULONG64>(fs_filenodes.get());

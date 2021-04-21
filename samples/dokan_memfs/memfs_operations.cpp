@@ -165,9 +165,7 @@ memfs_createfile(LPCWSTR filename, PDOKAN_IO_SECURITY_CONTEXT security_context,
       // Remove non specific attributes.
       file_attributes_and_flags &= ~FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL;
       // FILE_ATTRIBUTE_NORMAL is override if any other attribute is set.
-      if (file_attributes_and_flags & FILE_ATTRIBUTE_NORMAL &&
-          (file_attributes_and_flags & (file_attributes_and_flags - 1)))
-        file_attributes_and_flags &= ~FILE_ATTRIBUTE_NORMAL;
+      file_attributes_and_flags &= ~FILE_ATTRIBUTE_NORMAL;
     }
 
     switch (creation_disposition) {
@@ -331,6 +329,8 @@ static NTSTATUS DOKAN_CALLBACK memfs_writefile(LPCWSTR filename, LPCVOID buffer,
 
   auto file_size = f->get_filesize();
 
+  // An Offset -1 is like the file was opened with FILE_APPEND_DATA
+  // and we need to write at the end of the file.
   if (offset == -1) offset = file_size;
 
   if (dokanfileinfo->PagingIo) {

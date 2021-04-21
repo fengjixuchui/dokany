@@ -3,6 +3,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+### Added
+- Kernel - Add AllowIpcBatching option. [Looking for help to implement in the library.](https://github.com/dokan-dev/dokany/issues/981)
+- Kernel - Allow kernel driver logs to be dispatched to userland.
+- Kernel/Library - Add an option to use FSCTL Event type instead of IOCTL with dwDesiredAccess nullified.
+
+### Changed
+- Kernel - Remove legacy -1 status value conversion.
+- Kernel - Remove unused QueryDeviceRelations.
+- Kernel - Convert `DokanLogInfo` to `DDbgPrint` temporarily in `DokanMountVolume` until we have a better logging solution.
+- Kernel - Remove unused PNP IRP.
+- Kernel/Library - Removing `DOKAN_EVENT_DISABLE_OPLOCKS` flag.
+- Kernel - Centralize Irp Completion & Logging (Begin / End) and wrap request information into a `RequestContext`.
+- Mirror - Use `GetDiskFreeSpaceEx` to support larger volume space.
+- Kernel - Remove legacy mount service IOCTL code.
+
+### Fixed
+- Library - Fix rename with double `\` for drive network shared.
+- FUSE - Reuse `fuse_unmount` during `fuse_exit` to trigger `fuse_loop` to exit after Driver unmount the drive.
+- Kernel - Fix a very rare race condition that make library fail to detect unmount.
+- Kernel - Release CancelRoutine during Create timeout.
+
+## [1.4.1.1000] - 2021-01-14
+### Added
+- Kernel/Library - Added support for `FileIdExtdDirectoryInformation`. Fixes directory listings under WSL2.
+- Kernel/Library - Add `DOKAN_OPTION_CASE_SENSITIVE` mount option.
+- Library - Add `DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE` to allow unmounting network drive from explorer.
+- FUSE - Add removable drive option and use local drive as default type now.
+
+### Changed
+- Library - C++ redistributable dependencies is fully removed for this release.
+- Installer - Remove no longer needed dependency to KB2999226 (VC Redist).
+- Kernel - Change `DOKAN_CONTROL.VolumeDeviceObject` to `ULONG64` for other compiler than MSVC.
+- FUSE - Change default filesystem name to NTFS.
+
+### Fixed
+- Library - Reduce desired access rights for loop device handle and keepalive handle. Avoid some antivirus incompatibility.
+- Library - No longer wait for apps to answer `BroadcastSystemMessage` during mount.
+- Library - Return `STATUS_INVALID_PARAMETER` where appropriate. Fixes directory listings under WSL2.
+- FUSE - Incorrect convertion for MountPoint using chinese characters.
+- MemFS - Fix out of range read when the offset is bigger than the buffer.
+- MemFS - Always remove `FILE_ATTRIBUTE_NORMAL` as we set `FILE_ATTRIBUTE_ARCHIVE` before.
+- MemFS - Correctly handle current session option
+
 ## [1.4.0.1000] - 2020-01-06
 ### Added
 - MemFS - Add a new FS sample project: dokan_memfs. MemFS is a better example to debug and know the dokan driver/library feature supported and NTFS compliant. The FS pass most of WinFSTest and IFSTest. It looks to be stable enough to be included in the installer. It hasn't been test with real usage but it is expected to run without issue. MemFS is written in c++ and is under MIT license.
@@ -472,7 +516,8 @@ Latest Dokan version from Hiroki Asakawa.
  [http://dokan-dev.net/en]( http://web.archive.org/web/20150419082954/http://dokan-dev.net/en/)
 
 
-[Unreleased]: https://github.com/dokan-dev/dokany/compare/v1.3.1.1000...master
+[Unreleased]: https://github.com/dokan-dev/dokany/compare/v1.4.1.1000...master
+[1.4.1.1000]: https://github.com/dokan-dev/dokany/compare/v1.4.0.1000...v1.4.1.1000
 [1.4.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.3.1.1000...v1.4.0.1000
 [1.3.1.1000]: https://github.com/dokan-dev/dokany/compare/v1.3.0.1000...v1.3.1.1000
 [1.3.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.2.2.1000...v1.3.0.1000
